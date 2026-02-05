@@ -17,7 +17,12 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import (
+    Generator,
+    Optional,
+)
 
+import numpy as np
 import torch
 from librosa.filters import mel as librosa_mel_fn
 from torch import nn
@@ -54,6 +59,75 @@ from .configuration_qwen3_tts import (
 from .qwen3_tts_tokenizer import Qwen3TTSTokenizer
 
 logger = logging.get_logger(__name__)
+
+def _top_k_top_p_filtering(logits: torch.Tensor, top_k: int = 0, top_p: float = 1.0) -> torch.Tensor:
+    """Apply top-k and top-p (nucleus) filtering to logits."""
+    if top_k > 0:
+        topk = torch.topk(logits, k=min(top_k, logits.size(-1)), dim=-1)
+        min_keep = topk.values[..., -1, None]
+        logits = torch.where(logits < min_keep, torch.full_like(logits, float("-inf")), logits)
+    if top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+        probs = torch.softmax(sorted_logits, dim=-1)
+        cumprobs = torch.cumsum(probs, dim=-1)
+        mask = cumprobs > top_p
+        mask[..., 0] = False
+        sorted_logits = torch.where(mask, torch.full_like(sorted_logits, float("-inf")), sorted_logits)
+        inv_idx = torch.argsort(sorted_idx, dim=-1)
+        logits = torch.gather(sorted_logits, dim=-1, index=inv_idx)
+    return logits
+
+def _sample_next_token(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    suppress_tokens: Optional[list[int]] = None,
+) -> torch.Tensor:
+    """Sample next token from logits with temperature, top-k, top-p and token suppression."""
+    # Suppress tokens by setting their logits to -inf
+    if suppress_tokens is not None and len(suppress_tokens) > 0:
+        logits = logits.clone()
+        logits[..., suppress_tokens] = float("-inf")
+
+    if temperature <= 0:
+        return torch.argmax(logits, dim=-1)
+    logits = logits / temperature
+    logits = _top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+def _crossfade(prev_tail: np.ndarray, new_head: np.ndarray) -> np.ndarray:
+    """Crossfade between end of previous chunk and start of new chunk."""
+    n = min(len(prev_tail), len(new_head))
+    if n <= 0:
+        return new_head
+    w = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    return prev_tail[:n] * (1.0 - w) + new_head[:n] * w
+
+
+def _add_ref_code_context(
+    window_codes: torch.Tensor,
+    ref_code_context: Optional[torch.Tensor],
+    ref_code_frames: int,
+    decode_window_frames: int,
+) -> tuple[torch.Tensor, int]:
+    """Add ref_code as context prefix when window doesn't fill decode_window_frames.
+
+    Returns:
+        tuple: (window with prefix, number of ref_prefix_frames used)
+    """
+    if ref_code_context is None or window_codes.shape[0] >= decode_window_frames:
+        return window_codes, 0
+
+    available_space = decode_window_frames - window_codes.shape[0]
+    ref_prefix_frames = min(available_space, ref_code_frames)
+
+    if ref_prefix_frames > 0:
+        ref_prefix = ref_code_context[-ref_prefix_frames:]  # Use tail of ref_code
+        return torch.cat([ref_prefix, window_codes], dim=0), ref_prefix_frames
+
+    return window_codes, 0
 
 
 class Res2NetBlock(torch.nn.Module):
@@ -1835,6 +1909,60 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
     def get_supported_languages(self):
         return self.supported_languages
 
+    def enable_streaming_optimizations(
+        self,
+        decode_window_frames: int = 80,
+        use_compile: bool = True,
+        use_cuda_graphs: bool = True,
+        compile_mode: str = "reduce-overhead",
+        use_fast_codebook: bool = False,  # Disabled: needs debugging, currently slower
+        compile_codebook_predictor: bool = True,
+    ):
+        """
+        Enable torch.compile and CUDA graphs optimizations for streaming decode.
+
+        Call this after model loading to speed up streaming generation.
+        The optimizations apply to the speech tokenizer's decoder and talker.
+
+        Args:
+            decode_window_frames: Fixed window size for streaming (must match
+                                  decode_window_frames parameter in stream_generate_pcm)
+            use_compile: Apply torch.compile to the decoder
+            use_cuda_graphs: Capture CUDA graphs for the fixed window size
+            compile_mode: torch.compile mode ("reduce-overhead" recommended)
+            use_fast_codebook: Use fast codebook generation (bypasses HF generate() overhead)
+            compile_codebook_predictor: Apply torch.compile to codebook predictor (default True)
+
+        Returns:
+            self for method chaining
+
+        Example:
+            model = Qwen3TTSForConditionalGeneration.from_pretrained(...)
+            model.enable_streaming_optimizations(decode_window_frames=80)
+        """
+        if self.speech_tokenizer is None:
+            raise ValueError("Speech tokenizer not loaded. Call from_pretrained() first.")
+
+        # Enable decoder optimizations
+        self.speech_tokenizer.enable_streaming_optimizations(
+            decode_window_frames=decode_window_frames,
+            use_compile=use_compile,
+            use_cuda_graphs=use_cuda_graphs,
+            compile_mode=compile_mode,
+        )
+
+        # Enable fast codebook generation (bypasses HuggingFace generate() overhead)
+        if use_fast_codebook:
+            print("[Talker] Enabling fast codebook generation...")
+            self.talker.enable_fast_codebook_gen(True)
+
+        # Compile codebook predictor for faster inference
+        if compile_codebook_predictor and use_compile:
+            print(f"[CodePredictor] Compiling model with mode={compile_mode}...")
+            self.talker.code_predictor.enable_compile(mode=compile_mode)
+
+        return self
+
     @classmethod
     def from_pretrained(
         cls,
@@ -2316,6 +2444,256 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
         talker_hidden_states_list = [talker_hidden_states[i, :length, :] for i, length in enumerate(effective_lengths)]
 
         return talker_codes_list, talker_hidden_states_list
+
+    @torch.inference_mode()
+    def stream_generate_pcm(
+        self,
+        input_ids: list[torch.Tensor],
+        instruct_ids: Optional[list[torch.Tensor]] = None,
+        ref_ids: Optional[list[torch.Tensor]] = None,
+        voice_clone_prompt: Optional[list[dict]] = None,
+        languages: Optional[list[str]] = None,
+        speakers: Optional[list[str]] = None,
+        non_streaming_mode: bool = False,
+        # Sampling parameters for first codebook
+        do_sample: bool = True,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        temperature: float = 0.9,
+        # Sub-talker parameters (for remaining code groups)
+        subtalker_dosample: bool = True,
+        subtalker_top_k: int = 50,
+        subtalker_top_p: float = 1.0,
+        subtalker_temperature: float = 0.9,
+        # Streaming control
+        emit_every_frames: int = 8,
+        decode_window_frames: int = 80,
+        overlap_samples: int = 0,
+        max_frames: int = 10000,
+        # Optimization flags
+        use_optimized_decode: bool = True,
+    ) -> Generator[tuple[np.ndarray, int], None, None]:
+        """
+        Stream audio generation, yielding PCM chunks as they are generated.
+
+        Args:
+            input_ids: List of input token tensors
+            instruct_ids: Optional instruction token tensors
+            ref_ids: Optional reference token tensors
+            voice_clone_prompt: Optional voice cloning prompt dict
+            languages: List of language strings
+            speakers: Optional list of speaker names
+            non_streaming_mode: Whether to use non-streaming text mode
+            do_sample: Whether to sample (vs greedy) for first codebook
+            top_k: Top-k filtering for sampling
+            top_p: Top-p (nucleus) filtering for sampling
+            temperature: Sampling temperature
+            subtalker_*: Parameters for sub-codebook prediction
+            emit_every_frames: Emit PCM chunk every N codec frames
+            decode_window_frames: Window size for decoding (longer = better quality, more latency)
+            overlap_samples: Overlap samples for crossfade between chunks
+            max_frames: Maximum number of codec frames to generate
+            use_optimized_decode: Use CUDA graph optimized decode when available (default True)
+
+        Yields:
+            tuple[np.ndarray, int]: (pcm_chunk as float32 array, sample_rate)
+        """
+        # Build talker inputs
+        talker_input_embeds, talker_attention_mask, trailing_text_hiddens, tts_pad_embed = \
+            self._build_talker_inputs(
+                input_ids=input_ids,
+                instruct_ids=instruct_ids,
+                ref_ids=ref_ids,
+                voice_clone_prompt=voice_clone_prompt,
+                languages=languages,
+                speakers=speakers,
+                non_streaming_mode=non_streaming_mode,
+            )
+
+        eos_id = self.config.talker_config.codec_eos_token_id
+
+        # Build suppress_tokens list (same as in generate())
+        vocab_size = self.config.talker_config.vocab_size
+        suppress_tokens = [
+            i for i in range(vocab_size - 1024, vocab_size)
+            if i != eos_id
+        ]
+
+        # Mark step begin for CUDA graphs (required for torch.compile with reduce-overhead)
+        torch.compiler.cudagraph_mark_step_begin()
+
+        # Prefill: single forward pass to initialize KV cache
+        out = self.talker.forward(
+            inputs_embeds=talker_input_embeds,
+            attention_mask=talker_attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True,
+            trailing_text_hidden=trailing_text_hiddens,
+            tts_pad_embed=tts_pad_embed,
+            generation_step=None,
+            past_hidden=None,
+            past_key_values=None,
+            subtalker_dosample=subtalker_dosample,
+            subtalker_top_k=subtalker_top_k,
+            subtalker_top_p=subtalker_top_p,
+            subtalker_temperature=subtalker_temperature,
+        )
+
+        past_key_values = out.past_key_values
+        past_hidden = out.past_hidden
+        generation_step = out.generation_step
+
+        # Debug removed for performance: prefill done
+
+        # Sample first token from prefill logits
+        last_logits = out.logits[:, -1, :]
+        if do_sample:
+            token = _sample_next_token(last_logits, temperature, top_k, top_p, suppress_tokens)
+        else:
+            token = torch.argmax(last_logits, dim=-1)
+        # Debug removed for performance: first token sampled
+
+        # Extract ref_code for decoder context (if in ICL mode)
+        # This provides stable context from the start, eliminating early voice artifacts
+        ref_code_context: Optional[torch.Tensor] = None
+        ref_code_frames: int = 0
+        if voice_clone_prompt is not None:
+            ref_code_list = voice_clone_prompt.get("ref_code", None)
+            icl_mode_list = voice_clone_prompt.get("icl_mode", None)
+            if ref_code_list is not None and icl_mode_list is not None:
+                if ref_code_list[0] is not None and icl_mode_list[0]:
+                    ref_code_context = ref_code_list[0].to(self.talker.device)
+                    ref_code_frames = ref_code_context.shape[0]
+
+        # Decode loop
+        codes_buffer: list[torch.Tensor] = []
+        decoded_tail: Optional[np.ndarray] = None
+        frames_since_emit = 0
+        total_frames_emitted = 0  # Track how many frames we've already emitted audio for
+
+        for step_idx in range(max_frames):
+            # Mark step begin for CUDA graphs to avoid tensor overwrite errors
+            # This is required when using torch.compile with reduce-overhead mode
+            torch.compiler.cudagraph_mark_step_begin()
+
+            # Single-step forward
+            step_out = self.talker.forward(
+                input_ids=token.unsqueeze(1),
+                use_cache=True,
+                return_dict=True,
+                output_hidden_states=False,  # Disabled: codec_ids accessed via hidden_states[1] still works
+                past_key_values=past_key_values,
+                past_hidden=past_hidden,
+                generation_step=generation_step,
+                trailing_text_hidden=trailing_text_hiddens,
+                tts_pad_embed=tts_pad_embed,
+                subtalker_dosample=subtalker_dosample,
+                subtalker_top_k=subtalker_top_k,
+                subtalker_top_p=subtalker_top_p,
+                subtalker_temperature=subtalker_temperature,
+            )
+
+            # Update state for next iteration
+            past_key_values = step_out.past_key_values
+            past_hidden = step_out.past_hidden
+            generation_step = step_out.generation_step
+
+            # Get codec_ids from hidden_states tuple: (layer_outputs, codec_ids)
+            codec_ids = step_out.hidden_states[1]  # [B, num_code_groups]
+
+            # Check for EOS in first codebook ON GPU (avoids CPU sync bottleneck)
+            # EOS token is out of range for speech tokenizer, so we must not include it
+            if codec_ids[0, 0] == eos_id:
+                break
+
+            # Keep on GPU to avoid CPU<->GPU transfers during decode
+            codes_buffer.append(codec_ids[0].detach())
+
+            # Sample next token for first codebook
+            step_logits = step_out.logits[:, -1, :]
+            if do_sample:
+                token = _sample_next_token(step_logits, temperature, top_k, top_p, suppress_tokens)
+            else:
+                token = torch.argmax(step_logits, dim=-1)
+
+            frames_since_emit += 1
+            if frames_since_emit < emit_every_frames:
+                continue
+            frames_since_emit = 0
+
+            # Decode window of codec frames to PCM
+            start = max(0, len(codes_buffer) - decode_window_frames)
+            window_codes = torch.stack(codes_buffer[start:], dim=0)  # [T, num_code_groups]
+
+            # Add ref_code as context prefix for stable decoder context from the start
+            window, _ = _add_ref_code_context(
+                window_codes, ref_code_context, ref_code_frames, decode_window_frames
+            )
+
+            # Use optimized decode path when available
+            # Pass pad_to_size to ensure fixed tensor size for torch.compile
+            if use_optimized_decode and hasattr(self.speech_tokenizer, 'decode_streaming'):
+                wavs, sr = self.speech_tokenizer.decode_streaming(
+                    window.to(self.talker.device),
+                    use_optimized=True,
+                    pad_to_size=decode_window_frames,
+                )
+            else:
+                wavs, sr = self.speech_tokenizer.decode([{"audio_codes": window.to(self.talker.device)}])
+            # Debug removed for performance: decode time tracking
+
+            wav = wavs[0].astype(np.float32)
+
+            # Extract only new samples (tail of decoded window)
+            # Use fixed upsample rate to avoid floating-point drift
+            samples_per_frame = self.speech_tokenizer.get_decode_upsample_rate()
+            step_samples = samples_per_frame * emit_every_frames
+            chunk = wav[-step_samples:] if step_samples > 0 else wav
+
+            # Crossfade with previous chunk tail for smooth transition
+            if decoded_tail is not None and overlap_samples > 0:
+                ov = min(overlap_samples, len(decoded_tail), len(chunk))
+                if ov > 0:
+                    head = _crossfade(decoded_tail[-ov:], chunk[:ov])
+                    chunk = np.concatenate([head, chunk[ov:]], axis=0)
+
+            decoded_tail = chunk.copy()
+            total_frames_emitted = len(codes_buffer)  # Mark these frames as emitted
+            yield chunk, sr
+
+        # Flush: decode only remaining frames that haven't been emitted yet
+        remaining_frames = len(codes_buffer) - total_frames_emitted
+        if remaining_frames > 0:
+            # Decode a window that includes some context for quality
+            context_frames = min(total_frames_emitted, decode_window_frames - remaining_frames)
+            start_idx = total_frames_emitted - context_frames
+            window_codes = torch.stack(codes_buffer[start_idx:], dim=0)
+
+            # Add ref_code as context prefix for stable decoder context
+            window, flush_ref_prefix_frames = _add_ref_code_context(
+                window_codes, ref_code_context, ref_code_frames, decode_window_frames
+            )
+
+            wavs, sr = self.speech_tokenizer.decode([{"audio_codes": window.to(self.talker.device)}])
+            wav = wavs[0].astype(np.float32)
+
+            # Extract only the new samples (skip ref_code and context portions)
+            skip_frames = flush_ref_prefix_frames + context_frames
+            if skip_frames > 0:
+                samples_per_frame = len(wav) / window.shape[0]
+                skip_samples = int(skip_frames * samples_per_frame)
+                wav = wav[skip_samples:]
+
+            # Crossfade with previous tail
+            if decoded_tail is not None and overlap_samples > 0 and len(wav) > 0:
+                ov = min(overlap_samples, len(decoded_tail), len(wav))
+                if ov > 0:
+                    head = _crossfade(decoded_tail[-ov:], wav[:ov])
+                    wav = np.concatenate([head, wav[ov:]], axis=0)
+
+            # Debug removed for performance: flush done
+            yield wav, sr
 
 
 __all__ = [
