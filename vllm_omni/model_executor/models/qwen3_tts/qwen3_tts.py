@@ -158,6 +158,7 @@ class Qwen3TTSModelForGeneration(nn.Module):
             )
 
             t1 = time.time()
+            sample_rate: int = 0
             for chunk, sr in self.model.stream_generate_voice_clone(
                 text=text,
                 language="English",  # or any supported language
@@ -169,7 +170,9 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 print(f"Chunk generation time: {time.time() - t1} seconds")
                 t1 = time.time()
                 chunks.append(chunk)
-            result = np.concatenate(chunks)
+                sample_rate = sr
+
+            result = (chunks, sample_rate)
             # result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
         else:
             raise ValueError(f"Invalid task type: {task_type}")
