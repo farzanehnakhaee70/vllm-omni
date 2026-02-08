@@ -18,7 +18,14 @@ import time
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Optional,
+    Tuple,
+    Union,
+)
 from urllib.parse import urlparse
 
 import librosa
