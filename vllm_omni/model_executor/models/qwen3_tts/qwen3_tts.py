@@ -14,6 +14,7 @@
 # limitations under the License.
 import base64
 import io
+import time
 import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -150,7 +151,26 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 text, instruct=instruct, language=language, **runtime_additional_information
             )
         elif task_type == "Base":
-            result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
+            chunks = []
+            voice_clone_prompt = self.model.create_voice_clone_prompt(
+                ref_audio="sample.wav",
+                ref_text="Artificial intelligence is transforming industries by automating tasks that once required human intelligence and effort.",
+            )
+
+            t1 = time.time()
+            for chunk, sr in self.model.stream_generate_voice_clone(
+                text=text,
+                language="English",  # or any supported language
+                voice_clone_prompt=voice_clone_prompt,
+                emit_every_frames=4,
+                decode_window_frames=80,
+                overlap_samples=512,
+            ):
+                print(f"Chunk generation time: {time.time() - t1} seconds")
+                t1 = time.time()
+                chunks.append(chunk)
+            result = np.concatenate(chunks)
+            # result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
         else:
             raise ValueError(f"Invalid task type: {task_type}")
 
