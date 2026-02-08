@@ -575,6 +575,7 @@ class Omni(OmniBase):
         Raises:
             ValueError: If sampling_params_list is None or has incorrect length.
         """
+        print("Inside the generate method")
         if sampling_params_list is None:
             sampling_params_list = self.default_sampling_params_list
         elif not isinstance(sampling_params_list, Sequence):
