@@ -1890,6 +1890,56 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
     def get_supported_languages(self):
         return self.supported_languages
 
+    def enable_streaming_optimizations(
+        self,
+        decode_window_frames: int = 80,
+        use_compile: bool = True,
+        use_cuda_graphs: bool = True,
+        compile_mode: str = "reduce-overhead",
+        use_fast_codebook: bool = False,  # Disabled: needs debugging, currently slower
+        compile_codebook_predictor: bool = True,
+    ):
+        """
+        Enable torch.compile and CUDA graphs optimizations for streaming decode.
+        Call this after model loading to speed up streaming generation.
+        The optimizations apply to the speech tokenizer's decoder and talker.
+        Args:
+            decode_window_frames: Fixed window size for streaming (must match
+                                  decode_window_frames parameter in stream_generate_pcm)
+            use_compile: Apply torch.compile to the decoder
+            use_cuda_graphs: Capture CUDA graphs for the fixed window size
+            compile_mode: torch.compile mode ("reduce-overhead" recommended)
+            use_fast_codebook: Use fast codebook generation (bypasses HF generate() overhead)
+            compile_codebook_predictor: Apply torch.compile to codebook predictor (default True)
+        Returns:
+            self for method chaining
+        Example:
+            model = Qwen3TTSForConditionalGeneration.from_pretrained(...)
+            model.enable_streaming_optimizations(decode_window_frames=80)
+        """
+        if self.speech_tokenizer is None:
+            raise ValueError("Speech tokenizer not loaded. Call from_pretrained() first.")
+
+        # Enable decoder optimizations
+        self.speech_tokenizer.enable_streaming_optimizations(
+            decode_window_frames=decode_window_frames,
+            use_compile=use_compile,
+            use_cuda_graphs=use_cuda_graphs,
+            compile_mode=compile_mode,
+        )
+
+        # Enable fast codebook generation (bypasses HuggingFace generate() overhead)
+        if use_fast_codebook:
+            print("[Talker] Enabling fast codebook generation...")
+            self.talker.enable_fast_codebook_gen(True)
+
+        # Compile codebook predictor for faster inference
+        if compile_codebook_predictor and use_compile:
+            print(f"[CodePredictor] Compiling model with mode={compile_mode}...")
+            self.talker.code_predictor.enable_compile(mode=compile_mode)
+
+        return self
+
     @classmethod
     def from_pretrained(
         cls,

@@ -151,29 +151,32 @@ class Qwen3TTSModelForGeneration(nn.Module):
                 text, instruct=instruct, language=language, **runtime_additional_information
             )
         elif task_type == "Base":
-            chunks = []
-            voice_clone_prompt = self.model.create_voice_clone_prompt(
-                ref_audio="sample.wav",
-                ref_text="Artificial intelligence is transforming industries by automating tasks that once required human intelligence and effort.",
-            )
+            if text:
+                chunks = []
+                voice_clone_prompt = self.model.create_voice_clone_prompt(
+                    ref_audio="sample.wav",
+                    ref_text="Artificial intelligence is transforming industries by automating tasks that once required human intelligence and effort.",
+                )
 
-            t1 = time.time()
-            sample_rate: int = 0
-            for chunk, sr in self.model.stream_generate_voice_clone(
-                text=text,
-                language="English",  # or any supported language
-                voice_clone_prompt=voice_clone_prompt,
-                emit_every_frames=4,
-                decode_window_frames=80,
-                overlap_samples=512,
-            ):
-                print(f"Chunk generation time: {time.time() - t1} seconds")
                 t1 = time.time()
-                chunks.append(chunk)
-                sample_rate = sr
+                sample_rate: int = 0
+                for chunk, sr in self.model.stream_generate_voice_clone(
+                    text=text,
+                    language=language,  # or any supported language
+                    voice_clone_prompt=voice_clone_prompt,
+                    emit_every_frames=4,
+                    decode_window_frames=80,
+                    overlap_samples=512,
+                ):
+                    print(f"Chunk generation time: {time.time() - t1} seconds")
+                    t1 = time.time()
+                    chunks.append(chunk)
+                    sample_rate = sr
 
-            result = (chunks, sample_rate)
-            # result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
+                final_audio = np.concatenate(chunks)
+                result = ([final_audio], sample_rate)
+            else:
+                result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
         else:
             raise ValueError(f"Invalid task type: {task_type}")
 
