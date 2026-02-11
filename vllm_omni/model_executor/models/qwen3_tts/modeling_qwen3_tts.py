@@ -1091,6 +1091,7 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         generation_steps=None,
         **flash_attn_kwargs,
     ) -> BaseModelOutputWithPast:
+        torch.compiler.cudagraph_mark_step_begin()
         if input_ids is not None:
             raise ValueError("`input_ids` is expected to be `None`")
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1126,8 +1127,6 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
-
-        torch.compiler.cudagraph_mark_step_begin()
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
