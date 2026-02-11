@@ -89,6 +89,12 @@ class Qwen3TTSModelForGeneration(nn.Module):
             torch_dtype=torch.bfloat16,
             **attn_kwargs,
         )
+        self.model.enable_streaming_optimizations(
+            decode_window_frames=80,
+            use_compile=True,
+            use_cuda_graphs=False,  # Not needed with reduce-overhead mode
+            compile_mode="reduce-overhead",
+        )
         self.task_type = model_path.split("-")[-1].strip("/")
         # Mark that this model produces multimodal outputs
         self.have_multimodal_outputs = True
