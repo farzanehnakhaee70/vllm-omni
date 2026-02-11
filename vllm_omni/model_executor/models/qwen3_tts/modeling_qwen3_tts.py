@@ -1091,7 +1091,6 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         generation_steps=None,
         **flash_attn_kwargs,
     ) -> BaseModelOutputWithPast:
-        torch.compiler.cudagraph_mark_step_begin()
         if input_ids is not None:
             raise ValueError("`input_ids` is expected to be `None`")
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1717,6 +1716,7 @@ class Qwen3TTSTalkerForConditionalGeneration(Qwen3TTSTalkerTextPreTrainedModel, 
         # Generate
         else:
             last_id_hidden = self.get_input_embeddings()(input_ids)
+            torch.compiler.cudagraph_mark_step_begin()
             predictor_result = self.code_predictor.generate(
                 inputs_embeds=torch.cat((past_hidden, last_id_hidden), dim=1),
                 max_new_tokens=self.config.num_code_groups - 1,
