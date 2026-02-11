@@ -895,6 +895,20 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
         print("[Decoder] Compilation complete")
         return self
 
+    def _forward_impl(self, codes):
+        """Internal forward implementation for compilation."""
+        hidden = self.quantizer.decode(codes)
+        hidden = self.pre_conv(hidden).transpose(1, 2)
+        hidden = self.pre_transformer(inputs_embeds=hidden).last_hidden_state
+        hidden = hidden.permute(0, 2, 1)
+        for blocks in self.upsample:
+            for block in blocks:
+                hidden = block(hidden)
+        wav = hidden
+        for block in self.decoder:
+            wav = block(wav)
+        return wav.clamp(min=-1, max=1)
+
     def chunked_decode(self, codes, chunk_size=300, left_context_size=25):
         wavs = []
         start_index = 0
