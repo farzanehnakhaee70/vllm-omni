@@ -864,6 +864,37 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
             wav = block(wav)
         return wav.clamp(min=-1, max=1)
 
+    def compile_for_streaming(self, mode: str = "reduce-overhead", backend: str = "inductor"):
+        """
+        Apply torch.compile to the forward pass for faster streaming decode.
+
+        Note: "reduce-overhead" mode already includes CUDA graph optimizations internally,
+        so you should NOT use capture_cuda_graph() when using this mode.
+
+        Args:
+            mode: Compilation mode:
+                - "reduce-overhead" (recommended): Uses CUDA graphs internally, best for streaming
+                - "max-autotune": Maximum optimization, longer compile time
+                - "default": Good balance, no internal CUDA graphs
+            backend: Compilation backend ("inductor" recommended)
+        """
+        if not hasattr(torch, 'compile'):
+            print("[Decoder] torch.compile not available (requires PyTorch 2.0+)")
+            return self
+
+        print(f"[Decoder] Compiling forward with mode={mode}, backend={backend}...")
+        print(f"[Decoder] Note: mode='reduce-overhead' includes CUDA graphs automatically")
+        self._compiled_forward = torch.compile(
+            self._forward_impl,
+            mode=mode,
+            fullgraph=False,
+            dynamic=False,
+            backend=backend,
+        )
+        self._compile_mode = mode
+        print("[Decoder] Compilation complete")
+        return self
+
     def chunked_decode(self, codes, chunk_size=300, left_context_size=25):
         wavs = []
         start_index = 0
