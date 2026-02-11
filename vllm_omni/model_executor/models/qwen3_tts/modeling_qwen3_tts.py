@@ -1349,6 +1349,19 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(Qwen3TTSPreTraine
         model_kwargs["generation_steps"] = outputs.generation_steps
         return model_kwargs
 
+    def enable_compile(self, mode: str = "reduce-overhead"):
+        """
+        Enable torch.compile for the code predictor model.
+
+        This compiles the inner model forward pass for faster execution.
+        Should be called once after model loading.
+        """
+        self.model.forward = torch.compile(
+            self.model.forward,
+            mode=mode,
+            fullgraph=False,  # Allow graph breaks for flexibility
+        )
+
 
 @dataclass
 class Qwen3TTSTalkerOutputWithPast(ModelOutput):
