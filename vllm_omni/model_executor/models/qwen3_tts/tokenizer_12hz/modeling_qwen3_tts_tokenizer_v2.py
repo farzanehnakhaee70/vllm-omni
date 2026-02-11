@@ -1001,5 +1001,57 @@ class Qwen3TTSTokenizerV2Model(Qwen3TTSTokenizerV2PreTrainedModel):
 
         return Qwen3TTSTokenizerV2DecoderOutput(audio_values)
 
+    def enable_streaming_optimizations(
+        self,
+        decode_window_frames: int = 80,
+        use_compile: bool = True,
+        use_cuda_graphs: bool = False,  # Changed default: not needed with reduce-overhead
+        compile_mode: str = "reduce-overhead",
+    ):
+        """
+        Enable optimizations for streaming decode.
+
+        This method applies torch.compile to the decoder for faster streaming generation.
+
+        IMPORTANT: compile_mode="reduce-overhead" (default) already includes CUDA graph
+        optimizations internally. You do NOT need to set use_cuda_graphs=True with this mode.
+        Manual CUDA graphs are only useful with compile_mode="default".
+
+        Args:
+            decode_window_frames: Window size for streaming decode (used for manual CUDA graphs)
+            use_compile: Apply torch.compile to the decoder (recommended)
+            use_cuda_graphs: Capture manual CUDA graphs (only useful with compile_mode="default")
+            compile_mode: Mode for torch.compile:
+                - "reduce-overhead" (recommended): Includes CUDA graphs automatically
+                - "max-autotune": Maximum optimization
+                - "default": Basic compilation, can combine with manual CUDA graphs
+
+        Returns:
+            self for method chaining
+
+        Example:
+            # Recommended: just use torch.compile with reduce-overhead
+            model.speech_tokenizer.model.enable_streaming_optimizations(
+                use_compile=True,
+                compile_mode="reduce-overhead",
+            )
+        """
+        print(f"[Tokenizer] Enabling streaming optimizations...")
+        print(f"  use_compile={use_compile}, compile_mode={compile_mode}")
+        print(f"  use_cuda_graphs={use_cuda_graphs} (manual)")
+
+        if use_compile:
+            self.decoder.compile_for_streaming(mode=compile_mode)
+
+        # Only capture manual CUDA graphs if explicitly requested AND not using reduce-overhead
+        if use_cuda_graphs:
+            if compile_mode == "reduce-overhead":
+                print(f"[Tokenizer] Note: compile_mode='reduce-overhead' already includes CUDA graphs")
+                print(f"[Tokenizer] Manual CUDA graph capture skipped (not needed)")
+            else:
+                self.decoder.capture_cuda_graph(window_size=decode_window_frames)
+
+        return self
+
 
 __all__ = ["Qwen3TTSTokenizerV2Model", "Qwen3TTSTokenizerV2PreTrainedModel"]
