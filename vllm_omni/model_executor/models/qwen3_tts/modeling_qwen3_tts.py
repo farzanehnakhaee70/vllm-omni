@@ -1127,6 +1127,8 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        torch.compiler.cudagraph_mark_step_begin()
+
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             # Prepare mask arguments
@@ -1153,8 +1155,6 @@ class Qwen3TTSTalkerCodePredictorModel(Qwen3TTSPreTrainedModel):
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-
-        torch.compiler.cudagraph_mark_step_begin()
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
