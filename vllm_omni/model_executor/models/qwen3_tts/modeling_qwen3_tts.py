@@ -2789,7 +2789,6 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
 
         # Decode loop
         codes_buffer: list[torch.Tensor] = []
-        decoded_tail: Optional[np.ndarray] = None
         frames_since_emit = 0
         total_frames_emitted = 0  # Track how many frames we've already emitted audio for
 
@@ -2872,14 +2871,6 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
             step_samples = samples_per_frame * emit_every_frames
             chunk = wav[-step_samples:] if step_samples > 0 else wav
 
-            # Crossfade with previous chunk tail for smooth transition
-            if decoded_tail is not None and overlap_samples > 0:
-                ov = min(overlap_samples, len(decoded_tail), len(chunk))
-                if ov > 0:
-                    head = _crossfade(decoded_tail[-ov:], chunk[:ov])
-                    chunk = np.concatenate([head, chunk[ov:]], axis=0)
-
-            decoded_tail = chunk.copy()
             total_frames_emitted = len(codes_buffer)  # Mark these frames as emitted
             yield chunk, sr
 
