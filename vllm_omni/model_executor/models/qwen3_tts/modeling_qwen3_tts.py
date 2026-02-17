@@ -2897,13 +2897,6 @@ class Qwen3TTSForConditionalGeneration(Qwen3TTSPreTrainedModel, GenerationMixin)
                 skip_samples = int(skip_frames * samples_per_frame)
                 wav = wav[skip_samples:]
 
-            # Crossfade with previous tail
-            if decoded_tail is not None and overlap_samples > 0 and len(wav) > 0:
-                ov = min(overlap_samples, len(decoded_tail), len(wav))
-                if ov > 0:
-                    head = _crossfade(decoded_tail[-ov:], wav[:ov])
-                    wav = np.concatenate([head, wav[ov:]], axis=0)
-
             # Debug removed for performance: flush done
             yield wav, sr
 
