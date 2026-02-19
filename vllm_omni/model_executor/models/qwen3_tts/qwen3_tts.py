@@ -135,6 +135,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
         speaker = runtime_additional_information.pop("speaker", ["uncle_fu"])[0]
         language = runtime_additional_information.pop("language", ["Auto"])[0]
         instruct = runtime_additional_information.pop("instruct", [""])[0]
+        ref_audio = runtime_additional_information.pop("ref_audio", [""])[0]
+        ref_text = runtime_additional_information.pop("ref_text", [""])[0]
         for key, value in runtime_additional_information.items():
             if isinstance(value, list) and len(value) > 0:
                 runtime_additional_information[key] = value[0]
@@ -160,8 +162,8 @@ class Qwen3TTSModelForGeneration(nn.Module):
             if text:
                 chunks = []
                 voice_clone_prompt = self.model.create_voice_clone_prompt(
-                    ref_audio="sample.wav",
-                    ref_text="Artificial intelligence is transforming industries by automating tasks that once required human intelligence and effort.",
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
                 )
 
                 t1 = time.time()
