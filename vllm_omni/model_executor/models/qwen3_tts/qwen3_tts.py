@@ -137,6 +137,7 @@ class Qwen3TTSModelForGeneration(nn.Module):
         instruct = runtime_additional_information.pop("instruct", [""])[0]
         ref_audio = runtime_additional_information.pop("ref_audio", [""])[0]
         ref_text = runtime_additional_information.pop("ref_text", [""])[0]
+        py_generator = runtime_additional_information.pop("py_generator", [""])[0]
         for key, value in runtime_additional_information.items():
             if isinstance(value, list) and len(value) > 0:
                 runtime_additional_information[key] = value[0]
@@ -154,42 +155,40 @@ class Qwen3TTSModelForGeneration(nn.Module):
             result = self.model.generate_custom_voice(
                 text, speaker=speaker, language=language, instruct=instruct, **runtime_additional_information
             )
+            return self.make_omni_output(result, **kwargs)
         elif task_type == "VoiceDesign":
             result = self.model.generate_voice_design(
                 text, instruct=instruct, language=language, **runtime_additional_information
             )
+            return self.make_omni_output(result, **kwargs)
         elif task_type == "Base":
-            if text:
-                chunks = []
-                voice_clone_prompt = self.model.create_voice_clone_prompt(
-                    ref_audio=ref_audio,
-                    ref_text=ref_text,
-                )
+            if py_generator:
+                if text:
+                    voice_clone_prompt = self.model.create_voice_clone_prompt(
+                        ref_audio=ref_audio,
+                        ref_text=ref_text,
+                    )
 
-                t1 = time.time()
-                sample_rate: int = 0
-                for chunk, sr in self.model.stream_generate_voice_clone(
-                    text=text,
-                    language=language,  # or any supported language
-                    voice_clone_prompt=voice_clone_prompt,
-                    emit_every_frames=4,
-                    decode_window_frames=80,
-                    overlap_samples=512,
-                ):
-                    print(f"Chunk generation time: {time.time() - t1} seconds")
-                    t1 = time.time()
-                    chunks.append(chunk)
-                    sample_rate = sr
-
-                final_audio = np.concatenate(chunks)
-                result = ([final_audio], sample_rate)
+                    for chunk, sr in self.model.stream_generate_voice_clone(
+                        text=text,
+                        language=language,
+                        voice_clone_prompt=voice_clone_prompt,
+                        emit_every_frames=4,
+                        decode_window_frames=80,
+                        overlap_samples=512,
+                    ):
+                        yield self.make_omni_output(([chunk], sr), **kwargs)
+                else:
+                    result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
+                    return self.make_omni_output(result, **kwargs)
             else:
                 result = self.model.generate_voice_clone(text, language=language, **runtime_additional_information)
+                # Convert result to OmniOutput format
+                return self.make_omni_output(result, **kwargs)
         else:
             raise ValueError(f"Invalid task type: {task_type}")
 
-        # Convert result to OmniOutput format
-        return self.make_omni_output(result, **kwargs)
+
 
     def make_omni_output(self, model_outputs: torch.Tensor | OmniOutput | tuple, **kwargs: Any) -> OmniOutput:
         """
