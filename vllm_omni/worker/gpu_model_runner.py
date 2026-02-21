@@ -1,3 +1,4 @@
+import types
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -392,6 +393,13 @@ class OmniGPUModelRunner(GPUModelRunner):
 
     @torch.inference_mode()
     def extract_multimodal_outputs(self, hidden_states: torch.Tensor | list[torch.Tensor] | OmniOutput) -> dict:
+        if isinstance(hidden_states, types.GeneratorType):
+            def generator_wrapper():
+                for item in hidden_states:
+                    yield self.extract_multimodal_outputs(item)
+
+            return generator_wrapper()
+
         if (
             hasattr(self.model, "have_multimodal_outputs")
             and self.model.have_multimodal_outputs
